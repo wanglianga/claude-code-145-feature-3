@@ -1,8 +1,17 @@
 import { AlertEvent, CareProfile, DutyStaff, Elder, GridWorker } from '../types'
-import { assessSeverity, generatePlan, emptyProfile } from './workflow'
+import { assessSeverity, buildDeviceSuggestion, emptyProfile, generatePlan, NAP_FALSE_REASON } from './workflow'
 
 const MIN = 60 * 1000
 const HOUR = 60 * MIN
+const DAY = 24 * HOUR
+
+/** 取 dayOffset 天前（负数为过去）指定 HH:mm 的时间戳，用于午睡样本/告警 */
+function napAt(now: number, daysAgo: number, hm: string): number {
+  const [h, m] = hm.split(':').map(Number)
+  const d = new Date(now - daysAgo * DAY)
+  d.setHours(h, m, 0, 0)
+  return d.getTime()
+}
 
 // ===================== 老人档案 =====================
 
@@ -35,6 +44,14 @@ export function seedElders(now: number): Elder[] {
         { at: now - 3 * HOUR, place: '小区中心花园' },
         { at: now - 1 * HOUR, place: '家中' },
       ],
+      napWindows: [{ start: '13:00', end: '14:30' }],
+      heartRateSamples: [
+        { at: napAt(now, 1, '13:05'), bpm: 69, context: 'nap' },
+        { at: napAt(now, 1, '13:28'), bpm: 62, context: 'nap' },
+        { at: napAt(now, 1, '14:10'), bpm: 64, context: 'nap' },
+        { at: now - 2 * HOUR, bpm: 78, context: 'rest' },
+        { at: now - 30 * MIN, bpm: 88, context: 'activity' },
+      ],
     },
     {
       id: 'e2',
@@ -61,6 +78,11 @@ export function seedElders(now: number): Elder[] {
       trajectory: [
         { at: now - 8 * HOUR, place: '社区活动室' },
         { at: now - 2 * HOUR, place: '家中' },
+      ],
+      napWindows: [{ start: '12:30', end: '13:30' }],
+      heartRateSamples: [
+        { at: now - 1 * DAY, bpm: 58, context: 'nap' },
+        { at: now - 2 * HOUR, bpm: 72, context: 'rest' },
       ],
     },
     {
@@ -89,6 +111,11 @@ export function seedElders(now: number): Elder[] {
         { at: now - 4 * HOUR, place: '楼下晒太阳区' },
         { at: now - 1 * HOUR, place: '家中' },
       ],
+      napWindows: [{ start: '13:30', end: '15:00' }],
+      heartRateSamples: [
+        { at: now - 1 * DAY, bpm: 66, context: 'nap' },
+        { at: now - 3 * HOUR, bpm: 80, context: 'rest' },
+      ],
     },
     {
       id: 'e4',
@@ -115,6 +142,8 @@ export function seedElders(now: number): Elder[] {
         { at: now - 26 * HOUR, place: '滨河步道' },
         { at: now - 24 * HOUR, place: '家中' },
       ],
+      napWindows: [],
+      heartRateSamples: [{ at: now - 5 * HOUR, bpm: 74, context: 'rest' }],
     },
     {
       id: 'e5',
@@ -141,6 +170,11 @@ export function seedElders(now: number): Elder[] {
       trajectory: [
         { at: now - 6 * HOUR, place: '社区食堂' },
         { at: now - 5 * HOUR, place: '小区内花园' },
+      ],
+      napWindows: [{ start: '14:00', end: '15:30' }],
+      heartRateSamples: [
+        { at: now - 2 * DAY, bpm: 61, context: 'nap' },
+        { at: now - 4 * HOUR, bpm: 70, context: 'rest' },
       ],
     },
   ]
@@ -304,7 +338,48 @@ export function seedEvents(now: number): AlertEvent[] {
   ev4.family.response = 'false_alarm'
   ev4.family.note = '母亲在洗澡，手环摘了放在外面'
 
-  return [ev1, ev2, ev3, ev4]
+  // 5-7) 已结案：王秀兰 午睡时段连续 3 次长时间静止误报（家属确认）—— 阈值审批调整的汇总依据
+  const makeNapFalse = (daysAgo: number, id: string, note: string, responseMin: number): AlertEvent => {
+    const occurred = napAt(now, daysAgo, '13:46')
+    const base = makeEventBase(e1, 'stillness', '家-卧室', occurred, now)
+    const ev: AlertEvent = {
+      ...base,
+      id,
+      status: 'closed',
+      timeline: [
+        {
+          at: occurred,
+          actor: 'device',
+          kind: 'alert',
+          title: '手环上报长时间静止',
+          detail: `静止超45分钟，位置：家-卧室；午睡时段（13:00-14:30）静息心率 62-69bpm，生命体征平稳`,
+        },
+        { at: occurred + 1 * MIN, actor: 'system', kind: 'handle', title: '已通知紧急联系人', detail: '短信+APP推送：王莉（女儿）13811112222' },
+        { at: occurred + responseMin * MIN, actor: 'family', kind: 'confirm', title: '家属确认误报', detail: `王莉：${note}` },
+        { at: occurred + responseMin * MIN + 2 * MIN, actor: 'community', kind: 'followup', title: '回访完成', detail: '电话回访老人安好，确认在午睡' },
+        { at: occurred + responseMin * MIN + 5 * MIN, actor: 'community', kind: 'close', title: '事件结案', detail: '分类：设备误报' },
+      ],
+      closure: {
+        closedAt: occurred + (responseMin + 5) * MIN,
+        closedBy: '小吴',
+        category: 'device_false',
+        falseReason: NAP_FALSE_REASON,
+        deviceSuggestion: buildDeviceSuggestion('device_false', NAP_FALSE_REASON, { batteryAtAlert: base.batteryAtAlert } as unknown as AlertEvent, e1),
+        familyResponseMinutes: responseMin,
+        communityHandleMinutes: responseMin + 5,
+        summary: `午睡熟睡触发静止告警，家属${responseMin}分钟确认误报，老人安好。建议按午睡规律设置静止告警延后并结合心率兜底。`,
+      },
+    }
+    ev.family.respondedAt = occurred + responseMin * MIN
+    ev.family.response = 'false_alarm'
+    ev.family.note = note
+    return ev
+  }
+  const ev5 = makeNapFalse(10, 'EV-0990', '我妈每天13点左右午睡，这是老习惯了，肯定又睡着了', 9)
+  const ev6 = makeNapFalse(7, 'EV-0992', '在午睡，手环静止太久就报警，能不能午睡时别报', 7)
+  const ev7 = makeNapFalse(3, 'EV-0994', '又是午睡误报，老人好好的，这个告警太敏感了', 5)
+
+  return [ev1, ev2, ev3, ev4, ev5, ev6, ev7]
 }
 
 // ===================== 初始照护画像 =====================

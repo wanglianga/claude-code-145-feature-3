@@ -6,6 +6,7 @@ import {
   HomeOutlined,
   MedicineBoxOutlined,
   PhoneOutlined,
+  SettingOutlined,
   UserOutlined,
   WarningOutlined,
 } from '@ant-design/icons'
@@ -23,6 +24,7 @@ const KIND_META: Record<TimelineEntry['kind'], { color: string; icon: React.Reac
   followup: { color: 'cyan', icon: <CheckCircleOutlined />, label: '回访' },
   escalation: { color: 'orange', icon: <WarningOutlined />, label: '升级' },
   close: { color: 'green', icon: <CheckCircleOutlined />, label: '结案' },
+  threshold: { color: 'gold', icon: <SettingOutlined />, label: '阈值' },
 }
 
 const ACTOR_LABEL: Record<TimelineEntry['actor'], string> = {

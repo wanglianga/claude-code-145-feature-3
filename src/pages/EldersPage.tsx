@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
-import { Button, Card, Drawer, Form, Input, InputNumber, Progress, Space, Table, Tag, Typography, message } from 'antd'
-import { EditOutlined } from '@ant-design/icons'
+import { useNavigate } from 'react-router-dom'
+import { Alert, Button, Card, Drawer, Form, Input, InputNumber, Progress, Space, Table, Tag, Typography, message } from 'antd'
+import { AuditOutlined, EditOutlined } from '@ant-design/icons'
 import { useStore } from '../store/useStore'
 import { Elder } from '../types'
 import { fmtTime } from '../components/common'
@@ -9,6 +10,7 @@ const { Text } = Typography
 
 /** 老人档案与设备绑定：登记信息、阈值调整、佩戴习惯 */
 const EldersPage: React.FC = () => {
+  const nav = useNavigate()
   const elders = useStore((s) => s.elders)
   const profiles = useStore((s) => s.profiles)
   const updateThresholds = useStore((s) => s.updateThresholds)
@@ -45,10 +47,19 @@ const EldersPage: React.FC = () => {
           {
             title: '告警阈值',
             render: (_, e) => (
-              <Text style={{ fontSize: 12 }}>
-                心率{e.thresholds.heartRateLow}-{e.thresholds.heartRateHigh} · 静止{e.thresholds.stillnessMinutes}分 · 围栏
-                {e.thresholds.geofenceRadius}米 · 归家{e.thresholds.curfewTime}
-              </Text>
+              <Space direction="vertical" size={0}>
+                <Text style={{ fontSize: 12 }}>
+                  心率{e.thresholds.heartRateLow}-{e.thresholds.heartRateHigh} · 静止{e.thresholds.stillnessMinutes}分 · 围栏
+                  {e.thresholds.geofenceRadius}米 · 归家{e.thresholds.curfewTime}
+                </Text>
+                {e.thresholds.napStart ? (
+                  <Tag color="blue" style={{ fontSize: 11, marginInlineEnd: 0 }}>
+                    午睡延后 {e.thresholds.napStart}-{e.thresholds.napEnd}
+                  </Tag>
+                ) : (
+                  <Text type="secondary" style={{ fontSize: 11 }}>未设午睡延后</Text>
+                )}
+              </Space>
             ),
           },
           { title: '佩戴习惯', dataIndex: 'wearingHabit', width: 160 },
@@ -78,26 +89,39 @@ const EldersPage: React.FC = () => {
         onClose={() => setEditing(null)}
         width={420}
         extra={
-          <Button
-            type="primary"
-            onClick={() =>
-              form.validateFields().then((v) => {
-                if (!editing) return
-                updateThresholds(editing.id, {
-                  heartRateLow: v.heartRateLow,
-                  heartRateHigh: v.heartRateHigh,
-                  stillnessMinutes: v.stillnessMinutes,
-                  geofenceRadius: v.geofenceRadius,
-                  curfewTime: v.curfewTime,
-                })
-                updateWearingHabit(editing.id, v.wearingHabit)
+          <Space>
+            <Button
+              icon={<AuditOutlined />}
+              onClick={() => {
                 setEditing(null)
-                message.success('阈值与佩戴习惯已更新，后续告警将按新阈值判定')
-              })
-            }
-          >
-            保存
-          </Button>
+                nav('/thresholds')
+              }}
+            >
+              误报汇总与审批调整
+            </Button>
+            <Button
+              type="primary"
+              onClick={() =>
+                form.validateFields().then((v) => {
+                  if (!editing) return
+                  updateThresholds(editing.id, {
+                    heartRateLow: v.heartRateLow,
+                    heartRateHigh: v.heartRateHigh,
+                    stillnessMinutes: v.stillnessMinutes,
+                    geofenceRadius: v.geofenceRadius,
+                    curfewTime: v.curfewTime,
+                    napStart: v.napStart || undefined,
+                    napEnd: v.napEnd || undefined,
+                  })
+                  updateWearingHabit(editing.id, v.wearingHabit)
+                  setEditing(null)
+                  message.success('阈值与佩戴习惯已更新，后续告警将按新阈值判定')
+                })
+              }
+            >
+              保存
+            </Button>
+          </Space>
         }
       >
         {editing && (
@@ -105,7 +129,19 @@ const EldersPage: React.FC = () => {
             <Text type="secondary" style={{ fontSize: 12 }}>
               设备 {editing.deviceId} · 绑定于 {fmtTime(editing.lastVisit.at)} 前完成建档
             </Text>
-            <Form form={form} layout="vertical" style={{ marginTop: 12 }}>
+            <Alert
+              type="warning"
+              showIcon
+              style={{ margin: '8px 0 12px' }}
+              message="因误报需降低/延后告警时，请使用「误报汇总与审批调整」"
+              description="审批流程会自动汇总午睡时段、心率、活动轨迹与家属确认记录，并保留审批人、调整原因与观察期记录，供后续真实异常时回看。此处仅用于设备建档参数维护。"
+              action={
+                <Button size="small" type="link" onClick={() => { setEditing(null); nav('/thresholds') }}>
+                  去审批
+                </Button>
+              }
+            />
+            <Form form={form} layout="vertical">
               <Space>
                 <Form.Item name="heartRateLow" label="心率下限(bpm)" rules={[{ required: true }]}>
                   <InputNumber min={30} max={100} />
@@ -115,8 +151,16 @@ const EldersPage: React.FC = () => {
                 </Form.Item>
               </Space>
               <Form.Item name="stillnessMinutes" label="静止时长阈值（分钟）" rules={[{ required: true }]}>
-                <InputNumber min={15} max={180} style={{ width: '100%' }} />
+                <InputNumber min={15} max={240} style={{ width: '100%' }} />
               </Form.Item>
+              <Space>
+                <Form.Item name="napStart" label="午睡开始(HH:mm)" tooltip="午睡时段内静止告警延后，心率异常仍立即告警">
+                  <Input placeholder="13:00" style={{ width: 120 }} />
+                </Form.Item>
+                <Form.Item name="napEnd" label="午睡结束(HH:mm)">
+                  <Input placeholder="14:30" style={{ width: 120 }} />
+                </Form.Item>
+              </Space>
               <Form.Item name="geofenceRadius" label="电子围栏半径（米）" rules={[{ required: true }]}>
                 <InputNumber min={100} max={3000} step={100} style={{ width: '100%' }} />
               </Form.Item>

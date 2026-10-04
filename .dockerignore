@@ -5,3 +5,5 @@ dist
 Dockerfile
 docker-compose.yml
 .dockerignore
+
+.npm-cache

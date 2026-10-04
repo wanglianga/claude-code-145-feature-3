@@ -66,6 +66,19 @@ export interface EmergencyContact {
   priority: number // 通知顺序
 }
 
+/** 午睡时段（HH:mm，午睡均在白天，不做跨天处理） */
+export interface NapWindow {
+  start: string // 开始时间 HH:mm
+  end: string // 结束时间 HH:mm
+}
+
+/** 心率采样（午睡静息心率佐证，用于判断静止期间生命体征平稳） */
+export interface HeartRateSample {
+  at: number
+  bpm: number
+  context: 'nap' | 'rest' | 'activity' // 采样场景
+}
+
 /** 告警阈值（绑定手环时设定，可调整） */
 export interface Thresholds {
   heartRateLow: number // 心率下限 bpm
@@ -73,6 +86,8 @@ export interface Thresholds {
   stillnessMinutes: number // 静止时长阈值（分钟）
   geofenceRadius: number // 电子围栏半径（米）
   curfewTime: string // 归家时间 HH:mm
+  napStart?: string // 午睡开始时间 HH:mm（该时段静止告警延后/放宽）
+  napEnd?: string // 午睡结束时间 HH:mm
 }
 
 export interface TrajectoryPoint {
@@ -100,6 +115,8 @@ export interface Elder {
   historyFalseAlarms: number // 历史误报次数
   lastVisit: { at: number; worker: string; note: string } // 上一次回访记录
   trajectory: TrajectoryPoint[] // 最近活动轨迹
+  napWindows: NapWindow[] // 规律午睡时段（家属多次确认后沉淀）
+  heartRateSamples: HeartRateSample[] // 近期心率采样（午睡静息佐证）
 }
 
 // ===================== 处置流程 =====================
@@ -130,7 +147,7 @@ export type StepState = 'done' | 'active' | 'pending' | 'skipped'
 export interface TimelineEntry {
   at: number
   actor: 'device' | 'system' | 'family' | 'community' | 'medical'
-  kind: 'alert' | 'confirm' | 'visit' | 'handle' | 'medical' | 'followup' | 'escalation' | 'close'
+  kind: 'alert' | 'confirm' | 'visit' | 'handle' | 'medical' | 'followup' | 'escalation' | 'close' | 'threshold'
   title: string
   detail?: string
 }
@@ -205,8 +222,67 @@ export interface Closure {
   summary: string
 }
 
-// ===================== 照护画像 =====================
+// ===================== 误报阈值审批调整 =====================
 
+/** 变更中的单个阈值项 */
+export interface ThresholdChangeItem {
+  key: keyof Thresholds
+  label: string
+  before: string
+  after: string
+}
+
+/** 观察期评估结论 */
+export type ThresholdReviewOutcome = 'observing' | 'effective' | 'missed_risk' | 'reverted'
+
+export const THRESHOLD_REVIEW_LABEL: Record<ThresholdReviewOutcome, string> = {
+  observing: '观察中',
+  effective: '观察通过·误报下降',
+  missed_risk: '观察告警·疑似漏报真实风险',
+  reverted: '已回退阈值',
+}
+
+/**
+ * 阈值变更审批记录。
+ * 家属多次确认午睡静止误报后，社区汇总午睡时段/心率/轨迹/确认记录，
+ * 由医生或社区审批调整；调整后持续观察误报是否下降、真实风险是否被遗漏。
+ * 后续出现真实异常时，凭此记录回看当时为何降低或延后告警。
+ */
+export interface ThresholdChange {
+  id: string
+  elderId: string
+  createdAt: number
+  /** 审批人 */
+  approvedBy: string
+  approverRole: '社区医生' | '社区值班员'
+  /** 调整原因 */
+  reason: string
+  /** 汇总依据：关联的误报事件 id（午睡时段静止告警、家属确认记录） */
+  evidenceEventIds: string[]
+  /** 汇总依据摘要：午睡时段、心率区间、活动轨迹、家属确认次数 */
+  evidenceSummary: string
+  /** 医生/社区的调整意见 */
+  advice: string
+  /** 观察期天数 */
+  reviewDays: number
+  reviewUntil: number
+  changes: ThresholdChangeItem[]
+  /** 调整前/后阈值快照 */
+  before: Thresholds
+  after: Thresholds
+  status: 'active' | 'reviewed'
+  outcome: ThresholdReviewOutcome
+  /** 观察期评估时间与评估人 */
+  reviewedAt?: number
+  reviewedBy?: string
+  reviewNote?: string
+  /** 观察期内漏报/迟报的真实风险事件 id（若有） */
+  missedRiskEventIds: string[]
+  /** 观察期内该老人同类型的误报事件 id（验证误报是否下降） */
+  falseAlarmEventIds: string[]
+}
+
+// ===================== 照护画像 =====================
 export interface CareProfile {
   elderId: string
   falseAlarmCount: number // 设备误报

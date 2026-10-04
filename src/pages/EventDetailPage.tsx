@@ -20,8 +20,8 @@ import {
 } from 'antd'
 import { ArrowLeftOutlined, PhoneOutlined, SafetyOutlined } from '@ant-design/icons'
 import { useStore, GRID_WORKERS, nearestWorker } from '../store/useStore'
-import { CLOSURE_LABEL, ClosureCategory, ESCALATION_LABEL } from '../types'
-import { FALSE_REASONS } from '../store/workflow'
+import { CLOSURE_LABEL, ClosureCategory, ESCALATION_LABEL, THRESHOLD_REVIEW_LABEL } from '../types'
+import { FALSE_REASONS, activeChangesForEvent } from '../store/workflow'
 import { AlertTypeTag, SeverityTag, StatusTag, fmtMinutes, fmtTime } from '../components/common'
 import ElderInfoCard from '../components/ElderInfoCard'
 import PlanSteps from '../components/PlanSteps'
@@ -59,6 +59,7 @@ const EventDetailPage: React.FC = () => {
 
   const closed = ev.status === 'closed'
   const worker = nearestWorker(elder, GRID_WORKERS)
+  const activeChanges = activeChangesForEvent(store.thresholdChanges, ev)
 
   const familyAct = (response: 'false_alarm' | 'request_call' | 'request_visit' | 'called_120') => {
     store.familyRespond(ev.id, response, familyNote)
@@ -97,6 +98,47 @@ const EventDetailPage: React.FC = () => {
                   <Tag color="orange">{ESCALATION_LABEL[e.kind]}</Tag>
                   {fmtTime(e.at)} · {e.note}
                 </Text>
+              ))}
+            </Space>
+          }
+        />
+      )}
+
+      {activeChanges.length > 0 && (
+        <Alert
+          type={ev.closure?.category === 'real_risk' ? 'error' : 'warning'}
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="本事件发生时存在已审批生效的阈值调整（可回看当时为何降低/延后告警）"
+          description={
+            <Space direction="vertical" size={4}>
+              {activeChanges.map((c) => (
+                <div key={c.id}>
+                  <Space wrap size={4}>
+                    <Tag color="blue">{c.id}</Tag>
+                    <Tag>{THRESHOLD_REVIEW_LABEL[c.outcome]}</Tag>
+                    <Text style={{ fontSize: 12 }}>
+                      {fmtTime(c.createdAt)} 由 {c.approverRole} {c.approvedBy} 审批
+                    </Text>
+                  </Space>
+                  <div>
+                    <Text style={{ fontSize: 12 }}>
+                      调整：{c.changes.map((x) => `${x.label} ${x.before}→${x.after}`).join('；')}
+                    </Text>
+                  </div>
+                  <div>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      原因：{c.reason}
+                    </Text>
+                  </div>
+                  {ev.closure?.category === 'real_risk' && (
+                    <div>
+                      <Text type="danger" style={{ fontSize: 12 }}>
+                        本事件为真实风险，请回看该阈值调整是否造成告警延迟或遗漏，必要时在「误报分析与阈值审批」中回退阈值。
+                      </Text>
+                    </div>
+                  )}
+                </div>
               ))}
             </Space>
           }

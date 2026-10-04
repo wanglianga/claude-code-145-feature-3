@@ -38,3 +38,6 @@ temp/
 *recording*.webm
 *recording*.mp4
 *trace*.jsonl
+
+# local npm cache
+.npm-cache/

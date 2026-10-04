@@ -7,9 +7,15 @@ import {
   ClosureCategory,
   Elder,
   GridWorker,
+  HeartRateSample,
+  NapWindow,
   PlanStep,
   Severity,
   StepState,
+  ThresholdChange,
+  ThresholdChangeItem,
+  Thresholds,
+  TrajectoryPoint,
 } from '../types'
 
 // ===================== 演示参数 =====================
@@ -21,6 +27,18 @@ export const PHONE_NO_ANSWER_LIMIT = 2
 export const LOW_BATTERY = 20
 
 export const isNightTime = (d: Date) => d.getHours() >= 22 || d.getHours() < 6
+
+/** 判断给定时间是否处于登记的午睡时段 */
+export function inNapWindow(thresholds: Thresholds, at: number | Date): boolean {
+  if (!thresholds.napStart || !thresholds.napEnd) return false
+  const d = typeof at === 'number' ? new Date(at) : at
+  const cur = d.getHours() * 60 + d.getMinutes()
+  const [sh, sm] = thresholds.napStart.split(':').map(Number)
+  const [eh, em] = thresholds.napEnd.split(':').map(Number)
+  const start = sh * 60 + sm
+  const end = eh * 60 + em
+  return start <= end ? cur >= start && cur < end : cur >= start || cur < end
+}
 
 // ===================== 严重度评估 =====================
 
@@ -252,6 +270,7 @@ export function nearestWorker(elder: Elder, workers: GridWorker[]): GridWorker {
 export const FALSE_REASONS = [
   '洗澡/充电时未佩戴手环',
   '手环佩戴过松导致误判',
+  '老人午睡熟睡被误判（规律午睡时段）',
   '静止阈值过低（看书/看电视久坐）',
   '心率阈值不适配老人基础心率',
   '电子围栏半径过小',
@@ -269,6 +288,11 @@ export function buildDeviceSuggestion(category: ClosureCategory, falseReason: st
         break
       case '手环佩戴过松导致误判':
         tips.push('建议上门指导正确佩戴方式，腕带留一指空隙')
+        break
+      case '老人午睡熟睡被误判（规律午睡时段）':
+        tips.push(
+          `建议将午睡时段 ${elder.thresholds.napStart ?? '13:00'}-${elder.thresholds.napEnd ?? '14:30'} 设为静止告警豁免/延后时段，并将静止阈值由 ${elder.thresholds.stillnessMinutes} 分钟上调至 ${elder.thresholds.stillnessMinutes + 30} 分钟，午睡期间结合心率监测兜底`,
+        )
         break
       case '静止阈值过低（看书/看电视久坐）':
         tips.push(`建议将静止阈值由 ${elder.thresholds.stillnessMinutes} 分钟上调至 ${elder.thresholds.stillnessMinutes + 15} 分钟`)
@@ -367,4 +391,193 @@ export function emptyProfile(elderId: string, now: number): CareProfile {
 
 export function alertTypeLabel(t: AlertType) {
   return ALERT_TYPE_LABEL[t]
+}
+
+// ===================== 午睡误报汇总与阈值审批调整 =====================
+
+/** 午睡误报的统一结案原因（与 FALSE_REASONS 中一致） */
+export const NAP_FALSE_REASON = '老人午睡熟睡被误判（规律午睡时段）'
+
+export interface NapFalseSummary {
+  elder: Elder
+  /** 午睡静止误报事件（时间正序） */
+  events: AlertEvent[]
+  /** 家属确认次数 */
+  confirmCount: number
+  /** 误报跨越天数 */
+  spanDays: number
+  /** 午睡时段 */
+  napWindow: NapWindow | undefined
+  /** 午睡心率采样 */
+  napHrSamples: HeartRateSample[]
+  /** 午睡静息心率区间 [min,max] */
+  hrRange: [number, number] | null
+  /** 家属平均确认耗时（分钟） */
+  avgResponseMinutes: number | null
+  /** 误报时段附近的活动轨迹 */
+  trajectoryAround: TrajectoryPoint[]
+  /** 汇总后的调整建议 */
+  suggestion: string
+  /** 证据摘要文本（审批单与变更记录中留存） */
+  evidenceSummary: string
+}
+
+/**
+ * 汇总某位老人的午睡时段长时间静止误报：
+ * 聚合午睡时段、静息心率、活动轨迹与家属确认记录，作为医生/社区调整阈值的依据。
+ */
+export function summarizeNapFalseAlarms(elder: Elder, allEvents: AlertEvent[], now: number): NapFalseSummary | null {
+  const events = allEvents
+    .filter(
+      (e) =>
+        e.elderId === elder.id &&
+        e.type === 'stillness' &&
+        e.status === 'closed' &&
+        e.closure?.category === 'device_false' &&
+        e.closure.falseReason === NAP_FALSE_REASON,
+    )
+    .sort((a, b) => a.occurredAt - b.occurredAt)
+  if (!events.length) return null
+
+  const napWindow = elder.napWindows[0]
+  const napHrSamples = elder.heartRateSamples
+    .filter((s) => s.context === 'nap')
+    .sort((a, b) => a.at - b.at)
+  const hrRange: [number, number] | null = napHrSamples.length
+    ? [Math.min(...napHrSamples.map((s) => s.bpm)), Math.max(...napHrSamples.map((s) => s.bpm))]
+    : null
+  const responses = events.map((e) => e.closure?.familyResponseMinutes).filter((m): m is number => typeof m === 'number')
+  const avgResponseMinutes = responses.length ? Math.round(responses.reduce((a, b) => a + b, 0) / responses.length) : null
+  const firstAt = events[0].occurredAt
+  const spanDays = Math.max(1, Math.round((now - firstAt) / (24 * 3600 * 1000)))
+  const trajectoryAround = [...elder.trajectory].sort((a, b) => b.at - a.at).slice(0, 3)
+
+  const curStill = elder.thresholds.stillnessMinutes
+  const suggestion =
+    `建议${napWindow ? `将 ${napWindow.start}-${napWindow.end} 设为午睡静止告警延后时段` : '按老人午睡规律设置静止告警延后时段'}，` +
+    `午睡时段静止阈值由 ${curStill} 分钟上调至 ${curStill + 30} 分钟，期间心率低于 ${elder.thresholds.heartRateLow}bpm 或长时间无心率数据仍立即告警；` +
+    '调整后设置 14 天观察期，跟踪午睡误报是否下降及真实风险有无遗漏。'
+
+  const hrText = hrRange ? `${hrRange[0]}-${hrRange[1]}bpm` : '无采样'
+  const evidenceSummary =
+    `近 ${spanDays} 天午睡时段（${napWindow ? napWindow.start + '-' + napWindow.end : '未登记'}）连续 ${events.length} 次长时间静止告警，` +
+    `均由家属确认误报（平均 ${avgResponseMinutes ?? '—'} 分钟确认）；午睡静息心率 ${hrText}，生命体征平稳；` +
+    `告警前后轨迹：${trajectoryAround.map((t) => t.place).join('→') || '家中'}。`
+
+  return {
+    elder,
+    events,
+    confirmCount: events.length,
+    spanDays,
+    napWindow,
+    napHrSamples,
+    hrRange,
+    avgResponseMinutes,
+    trajectoryAround,
+    suggestion,
+    evidenceSummary,
+  }
+}
+
+// ===================== 阈值差异与变更记录 =====================
+
+export const THRESHOLD_FIELD_LABEL: Record<keyof Thresholds, string> = {
+  heartRateLow: '心率下限',
+  heartRateHigh: '心率上限',
+  stillnessMinutes: '静止时长阈值',
+  geofenceRadius: '电子围栏半径',
+  curfewTime: '归家时间',
+  napStart: '午睡开始时间',
+  napEnd: '午睡结束时间',
+}
+
+const formatThresholdValue = (key: keyof Thresholds, v: Thresholds[keyof Thresholds]): string => {
+  if (v === undefined || v === '') return '未设置'
+  if (key === 'stillnessMinutes') return `${v}分钟`
+  if (key === 'heartRateLow' || key === 'heartRateHigh') return `${v}bpm`
+  if (key === 'geofenceRadius') return `${v}米`
+  return String(v)
+}
+
+/** 比对调整前后阈值，返回发生变化的项 */
+export function diffThresholds(before: Thresholds, after: Thresholds): ThresholdChangeItem[] {
+  const keys = Object.keys(THRESHOLD_FIELD_LABEL) as (keyof Thresholds)[]
+  const out: ThresholdChangeItem[] = []
+  for (const key of keys) {
+    const b = before[key]
+    const a = after[key]
+    if (String(b ?? '') !== String(a ?? '')) {
+      out.push({
+        key,
+        label: THRESHOLD_FIELD_LABEL[key],
+        before: formatThresholdValue(key, b),
+        after: formatThresholdValue(key, a),
+      })
+    }
+  }
+  return out
+}
+
+/** 某事件发生时已生效的阈值变更（供事件详情回看"当时为何降低/延后告警"） */
+export function activeChangesForEvent(changes: ThresholdChange[], ev: AlertEvent): ThresholdChange[] {
+  return changes
+    .filter((c) => c.elderId === ev.elderId && c.createdAt <= ev.occurredAt)
+    .sort((a, b) => b.createdAt - a.createdAt)
+}
+
+export interface ObservationResult {
+  /** 调整后观察期内同类型（静止）误报事件 */
+  falseAfter: AlertEvent[]
+  /** 调整后观察期内结案的真实风险事件 */
+  realAfter: AlertEvent[]
+  /** 是否仍在观察期内 */
+  inPeriod: boolean
+  /** 观察建议结论 */
+  outcome: ThresholdChange['outcome']
+  note: string
+}
+
+/**
+ * 调整后的持续观察：误报是否下降、真实风险是否被遗漏。
+ * 观察期内一旦出现真实风险事件（尤其静止/心率类），提示回看是否与放宽阈值有关。
+ */
+export function observeThresholdChange(change: ThresholdChange, allEvents: AlertEvent[], now: number): ObservationResult {
+  const after = allEvents
+    .filter((e) => e.elderId === change.elderId && e.occurredAt > change.createdAt && e.status === 'closed')
+    .sort((a, b) => a.occurredAt - b.occurredAt)
+  const falseAfter = after.filter((e) => e.type === 'stillness' && e.closure?.category === 'device_false')
+  const realAfter = after.filter((e) => e.closure?.category === 'real_risk')
+  const inPeriod = now < change.reviewUntil
+
+  if (realAfter.length > 0) {
+    return {
+      falseAfter,
+      realAfter,
+      inPeriod,
+      outcome: 'missed_risk',
+      note: `观察期内出现 ${realAfter.length} 起真实风险事件，需立即回看阈值调整是否导致告警延迟或遗漏，必要时回退阈值。`,
+    }
+  }
+  if (inPeriod) {
+    return {
+      falseAfter,
+      realAfter,
+      inPeriod,
+      outcome: 'observing',
+      note:
+        falseAfter.length === 0
+          ? `观察期内暂无午睡静止误报，继续观察至 ${new Date(change.reviewUntil).toLocaleDateString('zh-CN')}。`
+          : `观察期内仍有 ${falseAfter.length} 起静止误报，需关注调整是否到位。`,
+    }
+  }
+  return {
+    falseAfter,
+    realAfter,
+    inPeriod: false,
+    outcome: falseAfter.length === 0 ? 'effective' : 'observing',
+    note:
+      falseAfter.length === 0
+        ? '观察期结束，午睡静止误报未再发生，且无真实风险遗漏，可确认调整有效。'
+        : `观察期结束但仍有 ${falseAfter.length} 起静止误报，建议医生复评是否进一步调整或回退。`,
+  }
 }
