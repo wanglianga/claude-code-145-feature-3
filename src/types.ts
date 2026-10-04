@@ -75,6 +75,61 @@ export interface Thresholds {
   curfewTime: string // 归家时间 HH:mm
 }
 
+/** 可调整的阈值项 */
+export type ThresholdKey = keyof Thresholds
+
+export const THRESHOLD_FIELD_LABEL: Record<ThresholdKey, string> = {
+  heartRateLow: '心率下限',
+  heartRateHigh: '心率上限',
+  stillnessMinutes: '静止时长阈值',
+  geofenceRadius: '电子围栏半径',
+  curfewTime: '归家时间',
+}
+
+/** 午睡时段（误报高发场景，用于汇总与按时段差异化阈值） */
+export interface NapWindow {
+  start: string // 午睡开始 HH:mm
+  end: string // 午睡结束 HH:mm
+}
+
+/** 心率采样点（午睡时段心率佐证：真实静止时心率平稳） */
+export interface HeartRateSample {
+  at: number
+  bpm: number
+}
+
+/**
+ * 阈值变更记录（审批留痕，永久保留）。
+ * 状态机：observing（观察期）→ effective（观察通过，持续生效）/ reverted（观察期发现漏报，已回退）。
+ * 后续出现真实异常时，社区可凭本记录回看当时为何降低或延后告警。
+ */
+export interface ThresholdChangeRecord {
+  id: string
+  elderId: string
+  changedAt: number
+  approver: string // 审批人（医生/社区负责人）
+  approverRole: string // 审批人身份，如：社区医生
+  reason: string // 调整原因（必填）
+  evidenceEventIds: string[] // 依据的误报事件（家属确认记录）
+  before: Partial<Thresholds>
+  after: Partial<Thresholds>
+  /** 午睡时段延后策略：仅午睡时段把静止告警延后 N 分钟（null 表示不延后） */
+  napDelayMinutes: number | null
+  observeUntil: number // 观察期截止时间
+  status: 'observing' | 'effective' | 'reverted'
+  observation?: {
+    reviewedAt: number
+    reviewedBy: string
+    falseAlarmsBefore: number // 观察依据：调整前同口径误报数
+    falseAlarmsAfter: number // 观察期内误报数
+    missedRisk: boolean // 观察期内是否发现被遗漏的真实风险
+    note: string
+  }
+  revertedAt?: number
+  revertedBy?: string
+  revertReason?: string
+}
+
 export interface TrajectoryPoint {
   at: number
   place: string
@@ -100,6 +155,8 @@ export interface Elder {
   historyFalseAlarms: number // 历史误报次数
   lastVisit: { at: number; worker: string; note: string } // 上一次回访记录
   trajectory: TrajectoryPoint[] // 最近活动轨迹
+  napWindow?: NapWindow // 午睡时段（老人日常午睡作息）
+  heartRateSamples?: HeartRateSample[] // 最近心率采样（午睡时段心率佐证）
 }
 
 // ===================== 处置流程 =====================

@@ -1,9 +1,11 @@
 import React, { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Alert, Button, Card, Col, Descriptions, Modal, Row, Select, Space, Statistic, Table, Tag, Typography, message } from 'antd'
-import { EditOutlined, IdcardOutlined } from '@ant-design/icons'
+import { EditOutlined, IdcardOutlined, SlidersOutlined } from '@ant-design/icons'
 import { useStore } from '../store/useStore'
 import { CareProfile } from '../types'
 import { fmtTime } from '../components/common'
+import { describeChange } from '../store/workflow'
 
 const { Text } = Typography
 
@@ -16,13 +18,17 @@ const REMINDER_OPTIONS = ['升级为电话+短信+APP三通道，并约谈家属
 
 /** 照护画像：由事件结案沉淀，区分设备误报 / 照护缺口 / 真实风险 */
 const ProfilesPage: React.FC = () => {
+  const nav = useNavigate()
   const elders = useStore((s) => s.elders)
   const profiles = useStore((s) => s.profiles)
+  const changes = useStore((s) => s.thresholdChanges)
   const updateStrategy = useStore((s) => s.updateStrategy)
   const [editing, setEditing] = useState<CareProfile | null>(null)
   const [strategy, setStrategy] = useState<CareProfile['strategy'] | null>(null)
 
   const elderName = (id: string) => elders.find((e) => e.id === id)?.name ?? id
+  const changesOf = (elderId: string) =>
+    changes.filter((c) => c.elderId === elderId).sort((a, b) => b.changedAt - a.changedAt)
 
   const openEdit = (p: CareProfile) => {
     setEditing(p)
@@ -87,6 +93,31 @@ const ProfilesPage: React.FC = () => {
                 <Descriptions.Item label="设备维护">{p.strategy.deviceMaintenance}</Descriptions.Item>
                 <Descriptions.Item label="家属提醒">{p.strategy.familyReminder}</Descriptions.Item>
               </Descriptions>
+              {changesOf(p.elderId).length > 0 && (
+                <div style={{ marginTop: 8 }}>
+                  <Text strong style={{ fontSize: 12 }}>
+                    阈值调整史（照护评估依据）
+                  </Text>
+                  {changesOf(p.elderId).slice(0, 2).map((c) => (
+                    <div key={c.id} style={{ marginTop: 4 }}>
+                      <Space size={4} wrap>
+                        <Tag color={c.status === 'effective' ? 'success' : c.status === 'observing' ? 'processing' : 'error'} style={{ marginInlineEnd: 0 }}>
+                          {c.status === 'effective' ? '生效中' : c.status === 'observing' ? '观察期' : '已回退'}
+                        </Tag>
+                        <Text style={{ fontSize: 11 }}>{describeChange(c)}</Text>
+                      </Space>
+                      <div>
+                        <Text type="secondary" style={{ fontSize: 11 }}>
+                          {fmtTime(c.changedAt)} · {c.approver}（{c.approverRole}）
+                        </Text>
+                      </div>
+                    </div>
+                  ))}
+                  <Button size="small" type="link" style={{ padding: 0, fontSize: 12 }} icon={<SlidersOutlined />} onClick={() => nav(`/thresholds?elder=${p.elderId}`)}>
+                    查看完整变更记录与观察结论
+                  </Button>
+                </div>
+              )}
               <Text type="secondary" style={{ fontSize: 11 }}>
                 更新于 {fmtTime(p.updatedAt)}
               </Text>

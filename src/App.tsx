@@ -7,6 +7,7 @@ import {
   IdcardOutlined,
   LogoutOutlined,
   SafetyOutlined,
+  SlidersOutlined,
   TeamOutlined,
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
@@ -16,6 +17,7 @@ import DashboardPage from './pages/DashboardPage'
 import EventDetailPage from './pages/EventDetailPage'
 import EldersPage from './pages/EldersPage'
 import ProfilesPage from './pages/ProfilesPage'
+import ThresholdReviewPage from './pages/ThresholdReviewPage'
 import FamilyPortalPage from './pages/FamilyPortalPage'
 
 const { Header, Sider, Content } = Layout
@@ -52,6 +54,7 @@ const CommunityShell: React.FC = () => {
           items={[
             { key: '/', icon: <AlertOutlined />, label: `告警工作台（${activeCount}）` },
             { key: '/elders', icon: <TeamOutlined />, label: '老人档案与设备' },
+            { key: '/thresholds', icon: <SlidersOutlined />, label: '误报阈值调整' },
             { key: '/profiles', icon: <IdcardOutlined />, label: '照护画像' },
           ]}
         />
@@ -84,6 +87,7 @@ const CommunityShell: React.FC = () => {
             <Route path="/" element={<DashboardPage />} />
             <Route path="/events/:id" element={<EventDetailPage />} />
             <Route path="/elders" element={<EldersPage />} />
+            <Route path="/thresholds" element={<ThresholdReviewPage />} />
             <Route path="/profiles" element={<ProfilesPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

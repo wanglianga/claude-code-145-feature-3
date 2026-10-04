@@ -10,25 +10,43 @@ import {
   ESCALATION_LABEL,
   EventStatus,
   Session,
+  ThresholdChangeRecord,
   Thresholds,
   TimelineEntry,
 } from '../types'
-import { DUTY_STAFF, GRID_WORKERS, dutyText, seedElders, seedEvents, seedProfiles } from './seed'
+import { DUTY_STAFF, GRID_WORKERS, dutyText, seedElders, seedEvents, seedProfiles, seedThresholdChanges } from './seed'
 import {
+  activeChangeAt,
   assessSeverity,
   buildDeviceSuggestion,
   checkEscalations,
   communityHandleMinutes,
+  describeChange,
   emptyProfile,
+  evaluateObservation,
   familyResponseMinutes,
   generatePlan,
+  isInNapWindow,
   isNightTime,
   nearestWorker,
   sedimentProfile,
 } from './workflow'
 
 let idSeq = 1002
+let changeSeq = 1
 const nextEventId = () => `EV-${++idSeq}`
+const nextChangeId = () => `TC-${String(++changeSeq).padStart(4, '0')}`
+
+/** 阈值调整申请入参 */
+export interface ThresholdChangeInput {
+  approver: string
+  approverRole: string
+  reason: string
+  after: Partial<Thresholds>
+  napDelayMinutes: number | null
+  observeDays: number
+  evidenceEventIds: string[]
+}
 
 export interface StoreState {
   session: Session | null
@@ -36,6 +54,7 @@ export interface StoreState {
   elders: Elder[]
   events: AlertEvent[]
   profiles: Record<string, CareProfile>
+  thresholdChanges: ThresholdChangeRecord[] // 阈值变更审批留痕（永久保留）
 
   now: () => number
   login: (role: 'community' | 'family', userName: string, elderId?: string) => void
@@ -55,13 +74,71 @@ export interface StoreState {
   recordFollowUp: (eventId: string, note: string) => void
   closeEvent: (eventId: string, category: ClosureCategory, falseReason: string | undefined, summary: string) => void
 
-  updateThresholds: (elderId: string, t: Thresholds) => void
+  /** 阈值调整（必须带审批人与原因，进入观察期） */
+  applyThresholdChange: (elderId: string, input: ThresholdChangeInput) => void
+  /** 观察期人工评估：通过转持续生效；发现漏报则自动回退 */
+  reviewThresholdChange: (recordId: string) => void
+  /** 人工回退阈值（仍保留记录与回退原因） */
+  revertThresholdChange: (recordId: string, reason: string) => void
   updateWearingHabit: (elderId: string, habit: string) => void
   updateStrategy: (elderId: string, strategy: CareProfile['strategy']) => void
 }
 
 function pushTimeline(ev: AlertEvent, entry: TimelineEntry): AlertEvent {
   return { ...ev, timeline: [...ev.timeline, entry] }
+}
+
+/** 某时点实际生效的静止阈值（午睡时段在阈值变更基础上再延后） */
+function effectiveStillness(
+  elder: Elder,
+  changes: ThresholdChangeRecord[],
+  at: number,
+): { minutes: number; napDelayed: boolean; change: ThresholdChangeRecord | null } {
+  const change = activeChangeAt(changes, elder.id, at)
+  let minutes = change?.after.stillnessMinutes ?? elder.thresholds.stillnessMinutes
+  let napDelayed = false
+  if (change?.napDelayMinutes != null && isInNapWindow(at, elder.napWindow)) {
+    minutes += change.napDelayMinutes
+    napDelayed = true
+  }
+  return { minutes, napDelayed, change }
+}
+
+/** 回退阈值：把档案阈值恢复为变更前取值，记录标记为 reverted（记录本身永久保留） */
+function buildRevert(
+  s: { elders: Elder[]; thresholdChanges: ThresholdChangeRecord[] },
+  rec: ThresholdChangeRecord,
+  now: number,
+  by: string,
+  reason: string,
+  observation?: {
+    note: string
+    falseAlarmsBefore: number
+    falseAlarmsAfter: number
+    missedRisk: boolean
+  },
+): { elders: Elder[]; thresholdChanges: ThresholdChangeRecord[] } {
+  const elders = s.elders.map((e) =>
+    e.id === rec.elderId ? { ...e, thresholds: { ...e.thresholds, ...rec.before } } : e,
+  )
+  const reverted: ThresholdChangeRecord = {
+    ...rec,
+    status: 'reverted',
+    revertedAt: now,
+    revertedBy: by,
+    revertReason: reason,
+    observation: observation
+      ? {
+          reviewedAt: now,
+          reviewedBy: by,
+          falseAlarmsBefore: observation.falseAlarmsBefore,
+          falseAlarmsAfter: observation.falseAlarmsAfter,
+          missedRisk: observation.missedRisk,
+          note: observation.note,
+        }
+      : rec.observation,
+  }
+  return { elders, thresholdChanges: s.thresholdChanges.map((c) => (c.id === rec.id ? reverted : c)) }
 }
 
 function applyEscalations(ev: AlertEvent, elder: Elder, now: number): AlertEvent {
@@ -84,6 +161,7 @@ export const useStore = create<StoreState>((set, get) => {
     elders: seedElders(boot),
     events: seedEvents(boot),
     profiles: seedProfiles(boot),
+    thresholdChanges: seedThresholdChanges(boot),
 
     now: () => Date.now() + get().timeOffset,
 
@@ -121,6 +199,7 @@ export const useStore = create<StoreState>((set, get) => {
         battery: elder.battery,
         historyFalseAlarms: elder.historyFalseAlarms,
       })
+      const { minutes: effStillness, napDelayed } = effectiveStillness(elder, s.thresholdChanges, now)
       const contact = [...elder.contacts].sort((a, b) => a.priority - b.priority)[0]
       let ev: AlertEvent = {
         id: nextEventId(),
@@ -141,12 +220,22 @@ export const useStore = create<StoreState>((set, get) => {
           severity,
           gridWorkers: GRID_WORKERS,
           dutyText,
+          effectiveStillnessMinutes: effStillness,
+          napDelayed,
         }),
         escalations: [],
         family: { contactName: contact.name, contactPhone: contact.phone, notifiedAt: now, timedOut: false },
         phoneAttempts: [],
         timeline: [
-          { at: now, actor: 'device', kind: 'alert', title: `手环上报${ALERT_TYPE_LABEL[type]}`, detail: `位置：${location}${isNight ? '，夜间时段' : ''}` },
+          {
+            at: now,
+            actor: 'device',
+            kind: 'alert',
+            title: `手环上报${ALERT_TYPE_LABEL[type]}`,
+            detail:
+              `位置：${location}${isNight ? '，夜间时段' : ''}` +
+              (type === 'stillness' && napDelayed ? `；午睡时段生效延后阈值 ${effStillness} 分钟` : ''),
+          },
           { at: now, actor: 'system', kind: 'handle', title: '已通知紧急联系人', detail: `短信+APP推送：${contact.name}（${contact.relation}）${contact.phone}` },
         ],
       }
@@ -363,8 +452,86 @@ export const useStore = create<StoreState>((set, get) => {
       })
     },
 
-    updateThresholds: (elderId, t) =>
-      set((s) => ({ elders: s.elders.map((e) => (e.id === elderId ? { ...e, thresholds: t } : e)) })),
+    /**
+     * 阈值调整申请：必须填写审批人与原因，记录依据事件，进入观察期。
+     * 审批通过后阈值立即用于后续告警判定，观察期结束须评估：误报下降则继续生效，发现漏报自动回退。
+     */
+    applyThresholdChange: (elderId, input) => {
+      const now = get().now()
+      set((s) => {
+        const elder = s.elders.find((e) => e.id === elderId)
+        if (!elder) return s
+        const before: Partial<Thresholds> = {}
+        const after: Partial<Thresholds> = {}
+        for (const k of Object.keys(input.after) as (keyof Thresholds)[]) {
+          const nv = input.after[k]
+          if (nv !== undefined && nv !== elder.thresholds[k]) {
+            ;(before as Record<string, string | number>)[k] = elder.thresholds[k]
+            ;(after as Record<string, string | number>)[k] = nv
+          }
+        }
+        const record: ThresholdChangeRecord = {
+          id: nextChangeId(),
+          elderId,
+          changedAt: now,
+          approver: input.approver.trim(),
+          approverRole: input.approverRole.trim(),
+          reason: input.reason.trim(),
+          evidenceEventIds: input.evidenceEventIds,
+          before,
+          after,
+          napDelayMinutes: input.napDelayMinutes,
+          observeUntil: now + input.observeDays * 24 * 3600 * 1000,
+          status: 'observing',
+        }
+        const elders = s.elders.map((e) => (e.id === elderId ? { ...e, thresholds: { ...e.thresholds, ...after } } : e))
+        return { elders, thresholdChanges: [record, ...s.thresholdChanges] }
+      })
+    },
+
+    /** 观察期评估：误报未增长且无漏报 → 转持续生效；发现被漏报的真实风险 → 自动回退 */
+    reviewThresholdChange: (recordId) => {
+      const now = get().now()
+      const s = get()
+      const rec = s.thresholdChanges.find((c) => c.id === recordId)
+      if (!rec || rec.status !== 'observing') return
+      const result = evaluateObservation(rec, s.events, now)
+      if (result.passed) {
+        const reviewed: ThresholdChangeRecord = {
+          ...rec,
+          status: 'effective',
+          observation: {
+            reviewedAt: now,
+            reviewedBy: s.session?.userName ?? '值班员',
+            falseAlarmsBefore: result.falseAlarmsBefore,
+            falseAlarmsAfter: result.falseAlarmsAfter,
+            missedRisk: false,
+            note: result.note,
+          },
+        }
+        set((st) => ({ thresholdChanges: st.thresholdChanges.map((c) => (c.id === recordId ? reviewed : c)) }))
+      } else {
+        set((st) =>
+          buildRevert(st, rec, now, st.session?.userName ?? '值班员', '观察期评估发现漏报的真实风险，系统自动回退至调整前阈值', {
+            note: result.note,
+            falseAlarmsBefore: result.falseAlarmsBefore,
+            falseAlarmsAfter: result.falseAlarmsAfter,
+            missedRisk: true,
+          }),
+        )
+      }
+    },
+
+    /** 人工回退（医生/社区判断继续放宽不安全），记录与回退原因永久保留 */
+    revertThresholdChange: (recordId, reason) => {
+      const now = get().now()
+      set((st) => {
+        const rec = st.thresholdChanges.find((c) => c.id === recordId)
+        if (!rec || rec.status === 'reverted') return st
+        return buildRevert(st, rec, now, st.session?.userName ?? '值班员', reason)
+      })
+    },
+
     updateWearingHabit: (elderId, habit) =>
       set((s) => ({ elders: s.elders.map((e) => (e.id === elderId ? { ...e, wearingHabit: habit } : e)) })),
     updateStrategy: (elderId, strategy) =>
@@ -375,4 +542,4 @@ export const useStore = create<StoreState>((set, get) => {
   }
 })
 
-export { GRID_WORKERS, DUTY_STAFF, nearestWorker }
+export { GRID_WORKERS, DUTY_STAFF, nearestWorker, describeChange }

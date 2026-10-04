@@ -53,6 +53,11 @@ const ElderInfoCard: React.FC<{ elder: Elder; communityView?: boolean }> = ({ el
           心率 {elder.thresholds.heartRateLow}-{elder.thresholds.heartRateHigh}bpm · 静止{elder.thresholds.stillnessMinutes}分钟 · 围栏
           {elder.thresholds.geofenceRadius}米 · 归家{elder.thresholds.curfewTime}
         </Descriptions.Item>
+        {elder.napWindow && (
+          <Descriptions.Item label="午睡时段">
+            {elder.napWindow.start}-{elder.napWindow.end}（该时段静止告警可按审批策略延后）
+          </Descriptions.Item>
+        )}
         <Descriptions.Item label="历史误报">{elder.historyFalseAlarms} 次</Descriptions.Item>
         {communityView && (
           <>

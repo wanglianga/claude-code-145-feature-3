@@ -1,8 +1,20 @@
-import { AlertEvent, CareProfile, DutyStaff, Elder, GridWorker } from '../types'
+import { AlertEvent, CareProfile, DutyStaff, Elder, GridWorker, ThresholdChangeRecord } from '../types'
 import { assessSeverity, generatePlan, emptyProfile } from './workflow'
 
 const MIN = 60 * 1000
 const HOUR = 60 * MIN
+
+/** 以今天为基准，构造 daysAgo 天前指定时分的时间戳 */
+function atTime(now: number, daysAgo: number, hour: number, minute: number): number {
+  const d = new Date(now - daysAgo * 24 * HOUR)
+  d.setHours(hour, minute, 0, 0)
+  return d.getTime()
+}
+
+/** 午睡心率采样时间（atTime 别名，语义化） */
+function napSampleAt(now: number, daysAgo: number, hour: number, minute: number): number {
+  return atTime(now, daysAgo, hour, minute)
+}
 
 // ===================== 老人档案 =====================
 
@@ -28,8 +40,16 @@ export function seedElders(now: number): Elder[] {
       thresholds: { heartRateLow: 55, heartRateHigh: 120, stillnessMinutes: 45, geofenceRadius: 500, curfewTime: '21:00' },
       accessInfo: '单元门禁密码 2502#，电梯需刷卡（物业可远程授权）',
       keyCustody: '备用钥匙托管在社区服务站A柜（编号K-17）',
-      historyFalseAlarms: 3,
+      historyFalseAlarms: 6,
       lastVisit: { at: now - 6 * 24 * HOUR, worker: '刘敏', note: '精神状态良好，提醒夜间充电时开启手机提醒' },
+      napWindow: { start: '13:00', end: '14:30' },
+      heartRateSamples: [
+        { at: napSampleAt(now, 1, 13, 5), bpm: 68 },
+        { at: napSampleAt(now, 1, 13, 15), bpm: 64 },
+        { at: napSampleAt(now, 1, 13, 25), bpm: 62 },
+        { at: napSampleAt(now, 1, 13, 35), bpm: 66 },
+        { at: napSampleAt(now, 3, 13, 20), bpm: 70 },
+      ],
       trajectory: [
         { at: now - 5 * HOUR, place: '家中' },
         { at: now - 3 * HOUR, place: '小区中心花园' },
@@ -304,7 +324,80 @@ export function seedEvents(now: number): AlertEvent[] {
   ev4.family.response = 'false_alarm'
   ev4.family.note = '母亲在洗澡，手环摘了放在外面'
 
-  return [ev1, ev2, ev3, ev4]
+  // 5) 王秀兰午睡时段长时间静止误报（3 起，家属均确认误报）—— 阈值调整汇总依据
+  const napReasons: { day: number; hm: number; note: string; place: string }[] = [
+    { day: 2, hm: 13 * 60 + 22, note: '王莉：我妈每天午饭后睡一个小时，手环又报静止了，人没事', place: '家-卧室' },
+    { day: 4, hm: 13 * 60 + 35, note: '王莉：母亲在午睡，电话确认过了，是误报', place: '家-卧室' },
+    { day: 7, hm: 13 * 60 + 12, note: '王莉：午睡时间误报，老人正在睡觉，心率也正常', place: '家-客厅沙发' },
+  ]
+  const napEvents: AlertEvent[] = napReasons.map((r, idx) => {
+    const occurred = atTime(now, r.day, Math.floor(r.hm / 60), r.hm % 60)
+    const base = makeEventBase(e1, 'stillness', r.place, occurred, now)
+    const id = `EV-09${90 + idx}`
+    const ev: AlertEvent = {
+      ...base,
+      id,
+      status: 'closed',
+      timeline: [
+        { at: occurred, actor: 'device', kind: 'alert', title: '手环上报长时间静止', detail: `静止超45分钟，位置：${r.place}（午睡时段 13:00-14:30）` },
+        { at: occurred + 1 * MIN, actor: 'system', kind: 'handle', title: '已通知紧急联系人', detail: '短信+APP推送：王莉（女儿）13811112222' },
+        { at: occurred + 5 * MIN, actor: 'family', kind: 'confirm', title: '家属确认误报', detail: r.note },
+        { at: occurred + 30 * MIN, actor: 'community', kind: 'followup', title: '回访完成', detail: '电话回访确认老人午睡安好' },
+        { at: occurred + 45 * MIN, actor: 'community', kind: 'close', title: '事件结案', detail: '分类：设备误报' },
+      ],
+      followUp: { at: occurred + 30 * MIN, by: '小吴', note: '电话回访确认老人午睡安好' },
+      closure: {
+        closedAt: occurred + 45 * MIN,
+        closedBy: '小吴',
+        category: 'device_false',
+        falseReason: '午睡时段正常午睡被误判',
+        deviceSuggestion:
+          '建议仅在午睡时段（13:00-14:30）将静止告警延后 30 分钟，心率/跌倒告警灵敏度不变，调整须经医生审批并进入观察期',
+        familyResponseMinutes: 5,
+        communityHandleMinutes: 45,
+        summary: `午睡时段静止告警，家属5分钟确认系老人正常午睡。近期已第${idx + 1}次同类误报，建议汇总午睡作息与心率数据后，经医生审批调整午睡时段阈值。`,
+      },
+    }
+    ev.family.respondedAt = occurred + 5 * MIN
+    ev.family.response = 'false_alarm'
+    ev.family.note = r.note
+    return ev
+  })
+
+  return [ev1, ev2, ev3, ev4, ...napEvents]
+}
+
+// ===================== 初始阈值变更记录（审批留痕，永久保留） =====================
+
+export function seedThresholdChanges(now: number): ThresholdChangeRecord[] {
+  // 张桂芳：12天前经社区医生审批上调静止阈值，7天观察期通过后生效
+  const changedAt = now - 12 * 24 * HOUR
+  const observeUntil = changedAt + 7 * 24 * HOUR
+  const reviewedAt = observeUntil
+  return [
+    {
+      id: 'TC-0001',
+      elderId: 'e3',
+      changedAt,
+      approver: '陈医生',
+      approverRole: '社区医生',
+      reason: '张桂芳老人高龄久坐（看电视、择菜）频繁触发静止告警，4起经家属确认误报且上门核验均平安；体检基础心率偏缓（52-58bpm），原40分钟阈值不适配其作息，经家属申请、社区医生评估后上调。',
+      evidenceEventIds: ['EV-0981', 'EV-0985', 'EV-0990', 'EV-0993'],
+      before: { stillnessMinutes: 30 },
+      after: { stillnessMinutes: 40 },
+      napDelayMinutes: null,
+      observeUntil,
+      status: 'effective',
+      observation: {
+        reviewedAt,
+        reviewedBy: '小吴',
+        falseAlarmsBefore: 4,
+        falseAlarmsAfter: 1,
+        missedRisk: false,
+        note: '观察期7天内静止误报由4起降至1起（系洗澡摘手环，与阈值无关），未发生漏报的真实异常，评估通过，调整继续生效。',
+      },
+    },
+  ]
 }
 
 // ===================== 初始照护画像 =====================
@@ -313,10 +406,10 @@ export function seedProfiles(now: number): Record<string, CareProfile> {
   const mk = (id: string, patch: Partial<CareProfile>): CareProfile => ({ ...emptyProfile(id, now), ...patch })
   return {
     e1: mk('e1', {
-      falseAlarmCount: 3,
-      riskLevel: 'low',
+      falseAlarmCount: 6,
+      riskLevel: 'medium',
       riskTags: ['设备误报偏多'],
-      strategy: { visitFrequency: '每周电话巡访一次', deviceMaintenance: '按季度常规巡检', familyReminder: 'APP推送 + 短信提醒' },
+      strategy: { visitFrequency: '隔日电话 + 每周上门一次', deviceMaintenance: '安排上门检修设备并重新标定阈值', familyReminder: 'APP推送 + 短信提醒' },
     }),
     e2: mk('e2', {
       realRiskCount: 1,

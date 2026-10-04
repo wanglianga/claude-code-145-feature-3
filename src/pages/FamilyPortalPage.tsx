@@ -1,8 +1,9 @@
 import React, { useState } from 'react'
-import { Alert, Button, Card, Col, Empty, Input, Layout, Row, Space, Tag, Typography, message } from 'antd'
-import { CheckCircleOutlined, HomeOutlined, LogoutOutlined, MedicineBoxOutlined, PhoneOutlined, SafetyOutlined } from '@ant-design/icons'
+import { Alert, Button, Card, Col, Empty, Input, Layout, List, Row, Space, Tag, Typography, message } from 'antd'
+import { CheckCircleOutlined, HistoryOutlined, HomeOutlined, LogoutOutlined, MedicineBoxOutlined, PhoneOutlined, SafetyOutlined } from '@ant-design/icons'
 import { useStore } from '../store/useStore'
 import { AlertTypeTag, SeverityTag, StatusTag, fmtTime } from '../components/common'
+import { describeChange } from '../store/workflow'
 import ElderInfoCard from '../components/ElderInfoCard'
 import EventTimeline from '../components/EventTimeline'
 
@@ -22,6 +23,7 @@ const FamilyPortalPage: React.FC = () => {
   const myEvents = events.filter((e) => e.elderId === session.elderId)
   const active = myEvents.filter((e) => e.status !== 'closed')
   const history = myEvents.filter((e) => e.status === 'closed')
+  const thresholdChanges = useStore((s) => s.thresholdChanges).filter((c) => c.elderId === session.elderId).sort((a, b) => b.changedAt - a.changedAt)
 
   if (!elder) return null
 
@@ -48,6 +50,41 @@ const FamilyPortalPage: React.FC = () => {
         <Row gutter={12}>
           <Col xs={24} lg={9}>
             <ElderInfoCard elder={elder} communityView={false} />
+            {thresholdChanges.length > 0 && (
+              <Card size="small" title={<Space><HistoryOutlined />老人告警阈值调整记录</Space>} style={{ marginBottom: 12 }}>
+                <Alert
+                  type="info"
+                  showIcon
+                  style={{ marginBottom: 8 }}
+                  message="社区汇总您多次确认的午睡误报后，经医生审批调整了静止告警阈值；调整原因与审批人永久留痕，观察期如漏报真实风险将自动回退。"
+                />
+                <List
+                  size="small"
+                  dataSource={thresholdChanges}
+                  renderItem={(c) => (
+                    <List.Item>
+                      <List.Item.Meta
+                        title={
+                          <Space wrap size={4}>
+                            <Text style={{ fontSize: 12 }}>{c.id} · {fmtTime(c.changedAt)}</Text>
+                            <Tag color={c.status === 'effective' ? 'success' : c.status === 'observing' ? 'processing' : 'error'}>
+                              {c.status === 'effective' ? '持续生效' : c.status === 'observing' ? '观察期中' : '已回退'}
+                            </Tag>
+                          </Space>
+                        }
+                        description={
+                          <Space direction="vertical" size={0}>
+                            <Text style={{ fontSize: 12 }}>{describeChange(c)}</Text>
+                            <Text type="secondary" style={{ fontSize: 11 }}>审批人：{c.approver}（{c.approverRole}）</Text>
+                            <Text type="secondary" style={{ fontSize: 11 }}>原因：{c.reason}</Text>
+                          </Space>
+                        }
+                      />
+                    </List.Item>
+                  )}
+                />
+              </Card>
+            )}
           </Col>
           <Col xs={24} lg={15}>
             {active.length === 0 && (

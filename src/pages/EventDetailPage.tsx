@@ -18,10 +18,10 @@ import {
   Typography,
   message,
 } from 'antd'
-import { ArrowLeftOutlined, PhoneOutlined, SafetyOutlined } from '@ant-design/icons'
+import { ArrowLeftOutlined, PhoneOutlined, SafetyCertificateOutlined, SafetyOutlined } from '@ant-design/icons'
 import { useStore, GRID_WORKERS, nearestWorker } from '../store/useStore'
 import { CLOSURE_LABEL, ClosureCategory, ESCALATION_LABEL } from '../types'
-import { FALSE_REASONS } from '../store/workflow'
+import { FALSE_REASONS, describeChange, isInNapWindow, thresholdsAtEvent } from '../store/workflow'
 import { AlertTypeTag, SeverityTag, StatusTag, fmtMinutes, fmtTime } from '../components/common'
 import ElderInfoCard from '../components/ElderInfoCard'
 import PlanSteps from '../components/PlanSteps'
@@ -59,6 +59,8 @@ const EventDetailPage: React.FC = () => {
 
   const closed = ev.status === 'closed'
   const worker = nearestWorker(elder, GRID_WORKERS)
+  const thresholdSnapshot = thresholdsAtEvent(store.thresholdChanges, elder, ev.occurredAt)
+  const inNap = isInNapWindow(ev.occurredAt, elder.napWindow)
 
   const familyAct = (response: 'false_alarm' | 'request_call' | 'request_visit' | 'called_120') => {
     store.familyRespond(ev.id, response, familyNote)
@@ -127,6 +129,50 @@ const EventDetailPage: React.FC = () => {
               </Descriptions.Item>
               {ev.family.note && <Descriptions.Item label="家属留言">{ev.family.note}</Descriptions.Item>}
             </Descriptions>
+          </Card>
+
+          {/* 事件发生时生效的阈值策略回看：后续真实异常时可查当时为何降低/延后告警 */}
+          <Card
+            size="small"
+            title={
+              <Space>
+                <SafetyCertificateOutlined />
+                告警判定时的阈值策略
+                {inNap && <Tag color="gold">午睡时段</Tag>}
+              </Space>
+            }
+            style={{ marginBottom: 12 }}
+          >
+            {thresholdSnapshot.change ? (
+              <Descriptions column={1} size="small" bordered>
+                <Descriptions.Item label="生效调整">
+                  {thresholdSnapshot.change.id} · {describeChange(thresholdSnapshot.change)}
+                </Descriptions.Item>
+                <Descriptions.Item label="审批人">
+                  {thresholdSnapshot.change.approver}（{thresholdSnapshot.change.approverRole}）· {fmtTime(thresholdSnapshot.change.changedAt)}
+                </Descriptions.Item>
+                <Descriptions.Item label="当时为何调整">{thresholdSnapshot.change.reason}</Descriptions.Item>
+                <Descriptions.Item label="当前记录状态">
+                  {thresholdSnapshot.change.status === 'effective' && <Tag color="success">持续生效</Tag>}
+                  {thresholdSnapshot.change.status === 'observing' && <Tag color="processing">当时处于观察期</Tag>}
+                  {thresholdSnapshot.change.status === 'reverted' && (
+                    <Space direction="vertical" size={0}>
+                      <Tag color="error">已回退</Tag>
+                      <Text type="secondary" style={{ fontSize: 11 }}>
+                        {fmtTime(thresholdSnapshot.change.revertedAt!)} {thresholdSnapshot.change.revertedBy}：{thresholdSnapshot.change.revertReason}
+                      </Text>
+                    </Space>
+                  )}
+                </Descriptions.Item>
+                {thresholdSnapshot.change.observation && (
+                  <Descriptions.Item label="观察评估结论">{thresholdSnapshot.change.observation.note}</Descriptions.Item>
+                )}
+              </Descriptions>
+            ) : (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                本事件按建档默认阈值判定（静止 {elder.thresholds.stillnessMinutes} 分钟{inNap ? '，发生在午睡时段但当时无时段延后策略' : ''}），无已审批的阈值变更。
+              </Text>
+            )}
           </Card>
         </Col>
 
